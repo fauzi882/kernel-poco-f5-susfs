@@ -1,0 +1,57 @@
+name: Build Custom Kernel (Marble + KSU Next)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Environment (Pinjam Server)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3
+
+      - name: Clone Toolchain (Mesin Kompilasi Clang)
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+
+      - name: Clone Kernel Source (Pondasi Kernel)
+        # Nanti link ini kita ganti dengan source yang paling pas buat Android 16 lu
+        run: |
+          git clone --depth=1 https://github.com/xiaomi-sm8450-kernel/android_kernel_xiaomi_sm8450.git kernel-source
+
+      - name: Suntik KernelSU Next & SuSFS
+        run: |
+          cd kernel-source
+          echo "Menyuntikkan KernelSU Next..."
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
+          echo "Persiapan folder patch SuSFS..."
+
+      - name: Proses Compile Kernel (Masak!)
+        run: |
+          cd kernel-source
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CC=clang
+          
+          # marble_defconfig adalah racikan standar buat POCO F5
+          make O=out vendor/marble_defconfig
+          make -j$(nproc --all) O=out
+
+      - name: Bungkus pakai AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp kernel-source/out/arch/arm64/boot/Image AnyKernel3/
+          cd AnyKernel3
+          zip -r9 ../CustomKernel-Marble.zip *
+
+      - name: Upload Hasil Akhir (File ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomKernel-Marble-Siap-Flash
+          path: CustomKernel-Marble.zip
+          
