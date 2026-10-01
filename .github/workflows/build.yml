@@ -51,6 +51,21 @@ jobs:
             git clone --depth=1 "$KERNEL_REPO" kernel-source
           fi
 
+      - name: Diagnosa source kernel
+        working-directory: kernel-source
+        run: |
+          echo "=== Versi kernel ==="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) ' Makefile || true
+          git log -1 --format='%h %s (%cd)' || true
+          echo "=== Branch yang ada di repo ==="
+          git ls-remote --heads origin | sed 's|.*refs/heads/||' | head -n 30 || true
+          echo "=== Source ini UDAH ada SuSFS / KSU belum? ==="
+          grep -rIl -i susfs --exclude-dir=.git --include='*.c' --include='*.h' --include='Kconfig' --include='Makefile' . | head -n 15 || true
+          ls -d drivers/kernelsu* 2>/dev/null || echo "(gak ada drivers/kernelsu)"
+          grep -rIl 'ksu_handle' --exclude-dir=.git fs kernel drivers/input | head -n 10 || true
+          echo "=== Lokasi defconfig marble ==="
+          find arch/arm64/configs -name '*marble*'
+
       - name: Integrasi KernelSU Next
         working-directory: kernel-source
         env:
@@ -87,8 +102,12 @@ jobs:
           echo "Pakai patch: $PATCH"
 
           # tes dulu tanpa nyentuh file; kalau ada hunk gagal, langsung stop (gak ditutupin lagi)
-          if ! patch -p1 --dry-run --forward < "$PATCH"; then
-            echo "::error::Patch SuSFS gak cocok sama source kernel ini. Perlu ditempel manual / ganti susfs_branch."
+          if ! patch -p1 --dry-run --forward < "$PATCH" > /tmp/dryrun.log 2>&1; then
+            echo "=== RINGKASAN: file yang gagal di-patch ==="
+            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/dryrun.log
+            echo "=== Jumlah hunk yang kebaca 'udah ke-patch' (tanda source udah ada SuSFS) ==="
+            grep -c -i "previously applied" /tmp/dryrun.log || true
+            echo "::error::Patch SuSFS gak cocok sama source kernel ini (lihat ringkasan di atas)."
             exit 1
           fi
           patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
