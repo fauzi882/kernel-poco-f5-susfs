@@ -2,77 +2,176 @@ name: Build Custom Kernel (Marble + KSU Next)
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "URL repo source kernel"
+        default: "https://github.com/PARADOX-X20/kernel_xiaomi_marble.git"
+      kernel_branch:
+        description: "Branch kernel (kosongin = default branch repo)"
+        default: ""
+      defconfig:
+        description: "Nama file defconfig (dicari otomatis di arch/arm64/configs)"
+        default: "marble_defconfig"
+      enable_susfs:
+        description: "Aktifin SuSFS? (run pertama matiin dulu buat tes build polos)"
+        type: boolean
+        default: true
+      susfs_branch:
+        description: "Branch susfs4ksu (harus cocok sama versi kernel)"
+        default: "gki-android12-5.10"
 
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash   # otomatis pakai -e -o pipefail
+    env:
+      ZIP_NAME: Marble-KSUNext-${{ github.run_number }}.zip
+
     steps:
-      - name: Setup Environment (Pinjam Server)
+      - name: Setup environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc x11proto-core-dev libx11-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3 libncurses-dev
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex make zip curl cpio rsync xz-utils lz4 lzop \
+            libssl-dev libelf-dev libncurses-dev device-tree-compiler python3 \
+            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          clang --version | head -n1
 
-      - name: Clone Toolchain (Mesin Kompilasi Clang)
+      - name: Clone kernel source
+        env:
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
+          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          if [ -n "$KERNEL_BRANCH" ]; then
+            git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel-source
+          else
+            git clone --depth=1 "$KERNEL_REPO" kernel-source
+          fi
 
-      - name: Clone Kernel Source (Pondasi Kernel)
+      - name: Integrasi KernelSU Next
+        working-directory: kernel-source
+        env:
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
         run: |
-          git clone --depth=1 https://github.com/PARADOX-X20/kernel_xiaomi_marble.git kernel-source
+          # setup.sh resmi: clone KSU Next, bikin symlink drivers/kernelsu,
+          # dan otomatis nambah entry ke drivers/Makefile + drivers/Kconfig
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            # branch next-susfs udah bawa glue SuSFS (jadi patch 10_enable_susfs_for_ksu GAK dipakai,
+            # patch itu khusus KernelSU resmi, bukan Next)
+            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next-susfs/kernel/setup.sh" | bash -s next-susfs
+          else
+            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          fi
+          test -e drivers/kernelsu/Kconfig || { echo "::error::KSU Next gagal terintegrasi"; exit 1; }
+          grep -n kernelsu drivers/Makefile drivers/Kconfig
 
-      - name: Suntik KernelSU Next & SuSFS
+      - name: Patch SuSFS ke kernel
+        if: ${{ inputs.enable_susfs }}
+        working-directory: kernel-source
+        env:
+          SUSFS_BRANCH: ${{ inputs.susfs_branch }}
         run: |
-          cd kernel-source
-          echo "Menyedot KernelSU Next resmi..."
-          git clone https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
-          
-          echo "Memasukkan KSU Next ke dalam urat nadi kernel..."
-          cp -r KernelSU-Next/kernel drivers/kernelsu
-          
-          echo "Menambahkan KSU ke sistem build (Kconfig & Makefile)..."
-          echo 'source "drivers/kernelsu/Kconfig"' >> arch/arm64/configs/Kconfig
-          sed -i '/obj-y += char\//a obj-y += kernelsu\/' drivers/Makefile
-          
-          echo "Menyedot bahan baku SuSFS..."
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs-bahan
-          
-          echo "Menyuntikkan Patch SuSFS ke KernelSU dan Kernel..."
-          cp susfs-bahan/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch drivers/kernelsu/
-          cd drivers/kernelsu
-          patch -p1 < 10_enable_susfs_for_ksu.patch || true
-          cd ../../
-          
-          echo "Menambahkan hooks SuSFS ke sistem..."
-          cp susfs-bahan/kernel_patches/50_add_susfs_in_kernel-5.10.patch .
-          patch -p1 < 50_add_susfs_in_kernel-5.10.patch || echo "Patch kernel mungkin butuh penyesuaian manual di PARADOX, kita lanjut dulu!"
-          
-          echo "Suntikan selesai, bersihkan sisa bahan..."
-          rm -rf KernelSU-Next susfs-bahan
-          cd ..
+          git clone --depth=1 -b "$SUSFS_BRANCH" https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          PATCH=$(ls ../susfs4ksu/kernel_patches/50_add_susfs_in_*.patch | head -n1)
+          echo "Pakai patch: $PATCH"
 
-      - name: Proses Compile Kernel (Masak!)
+          # tes dulu tanpa nyentuh file; kalau ada hunk gagal, langsung stop (gak ditutupin lagi)
+          if ! patch -p1 --dry-run --forward < "$PATCH"; then
+            echo "::error::Patch SuSFS gak cocok sama source kernel ini. Perlu ditempel manual / ganti susfs_branch."
+            exit 1
+          fi
+          patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
+          find . -name '*.rej' | grep . && exit 1 || true
+
+      - name: Siapin defconfig
+        working-directory: kernel-source
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
         run: |
-          cd kernel-source
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CC=clang
-          
-          make O=out vendor/marble_defconfig
-          make -j$(nproc --all) O=out
+          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
+          if [ -z "$DEF_PATH" ]; then
+            echo "::error::defconfig $DEFCONFIG gak ketemu. Isi folder configs:"
+            find arch/arm64/configs -name '*marble*'
+            exit 1
+          fi
+          echo "DEFCONFIG_REL=${DEF_PATH#arch/arm64/configs/}" >> "$GITHUB_ENV"
+
+          # tanpa ini KSU gak ikut ke-compile sama sekali
+          {
+            echo ""
+            echo "CONFIG_KSU=y"
+          } >> "$DEF_PATH"
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            echo "CONFIG_KSU_SUSFS=y" >> "$DEF_PATH"
+          fi
+
+      - name: Compile kernel
+        working-directory: kernel-source
+        env:
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+        run: |
+          # CC harus lewat argumen make (export CC=clang di-override sama Makefile kernel)
+          MAKE_ARGS=(
+            O=out ARCH=arm64
+            LLVM=1 LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            KCFLAGS=-Wno-error   # clang baru sering protes warning di source lama
+          )
+
+          make "${MAKE_ARGS[@]}" "$DEFCONFIG_REL"
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          echo "=== Cek config KSU ==="
+          grep -E "^CONFIG_KSU" out/.config || true
+          grep -q "^CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU gak aktif di .config"; exit 1; }
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "::error::CONFIG_KSU_SUSFS gak aktif (versi KSU Next & SuSFS mungkin gak cocok)"; exit 1; }
+          fi
+
+          # cuma bangun Image (cukup buat AnyKernel3). Tambahin 'dtbs' di belakang kalau butuh dtb
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log
 
       - name: Bungkus pakai AnyKernel3
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          cp kernel-source/out/arch/arm64/boot/Image AnyKernel3/
-          cd AnyKernel3
-          zip -r9 ../CustomKernel-Marble.zip *
+          IMG=kernel-source/out/arch/arm64/boot/Image
+          test -f "$IMG" || { echo "::error::Image gak kebentuk"; exit 1; }
 
-      - name: Upload Hasil Akhir (File ZIP)
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp "$IMG" AnyKernel3/Image
+          cd AnyKernel3
+
+          # default AnyKernel3 isinya device 'maguro' -> kalau gak diganti, flash pasti ditolak
+          sed -i \
+            -e 's|^kernel.string=.*|kernel.string=Custom Kernel Marble (KSU Next)|' \
+            -e 's|^do.modules=.*|do.modules=0|' \
+            -e 's|^device.name1=.*|device.name1=marble|' \
+            -e 's|^device.name2=.*|device.name2=marblein|' \
+            -e 's|^device.name3=.*|device.name3=|' \
+            -e 's|^device.name4=.*|device.name4=|' \
+            -e 's|^device.name5=.*|device.name5=|' \
+            -e 's|^BLOCK=.*|BLOCK=boot;|' \
+            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|' \
+            anykernel.sh
+          grep -nE '^(kernel.string|device.name|BLOCK|IS_SLOT_DEVICE)' anykernel.sh
+
+          zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*placeholder'
+
+      - name: Upload hasil akhir (ZIP)
         uses: actions/upload-artifact@v4
         with:
           name: CustomKernel-Marble-Siap-Flash
-          path: CustomKernel-Marble.zip
-          
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Upload log kalau gagal
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel-source/build.log
+          if-no-files-found: ignore
