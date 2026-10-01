@@ -56,15 +56,23 @@ jobs:
         env:
           ENABLE_SUSFS: ${{ inputs.enable_susfs }}
         run: |
-          # setup.sh resmi: clone KSU Next, bikin symlink drivers/kernelsu,
+          # setup.sh: clone KSU Next, bikin symlink drivers/kernelsu,
           # dan otomatis nambah entry ke drivers/Makefile + drivers/Kconfig
           if [ "$ENABLE_SUSFS" = "true" ]; then
-            # branch next-susfs udah bawa glue SuSFS (jadi patch 10_enable_susfs_for_ksu GAK dipakai,
-            # patch itu khusus KernelSU resmi, bukan Next)
-            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next-susfs/kernel/setup.sh" | bash -s next-susfs
+            # KSU Next yang udah bawa glue SuSFS sekarang ada di fork pershoot (branch dev-susfs).
+            # Branch lama "next-susfs" di repo KernelSU-Next resmi udah 404, itu penyebab error sebelumnya.
+            # Karena udah bawa SuSFS, patch 10_enable_susfs_for_ksu GAK dipakai.
+            SETUP_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh"
+            KSU_REF="dev-susfs"
           else
-            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+            SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
+            KSU_REF="dev"
           fi
+          # -f = kalau 404 langsung gagal. Tanpa ini, tulisan "404: Not Found"
+          # malah dijalanin sebagai script (itu yang muncul "404:: command not found")
+          curl -fLsS "$SETUP_URL" -o setup.sh
+          bash setup.sh "$KSU_REF"
+          rm -f setup.sh
           test -e drivers/kernelsu/Kconfig || { echo "::error::KSU Next gagal terintegrasi"; exit 1; }
           grep -n kernelsu drivers/Makefile drivers/Kconfig
 
@@ -85,6 +93,13 @@ jobs:
           fi
           patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
           find . -name '*.rej' | grep . && exit 1 || true
+
+          # SuSFS versi baru nyimpen susfs.c / susfs.h di folder terpisah (bukan di dalam patch).
+          # cp -n = gak nimpa kalau file-nya ternyata udah dibuat sama patch.
+          SRC=../susfs4ksu/kernel_patches
+          if [ -d "$SRC/fs" ]; then cp -rn "$SRC/fs/." fs/; fi
+          if [ -d "$SRC/include/linux" ]; then cp -rn "$SRC/include/linux/." include/linux/; fi
+          test -f include/linux/susfs.h || { echo "::error::susfs.h gak ada setelah patch"; exit 1; }
 
       - name: Siapin defconfig
         working-directory: kernel-source
