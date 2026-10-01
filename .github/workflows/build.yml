@@ -19,7 +19,7 @@ jobs:
       - name: Clone Kernel Source (Pondasi Kernel)
         # Nanti link ini kita ganti dengan source yang paling pas buat Android 16 lu
         run: |
-          git clone --depth=1 https://github.com/xiaomi-sm8450-kernel/android_kernel_xiaomi_sm8450.git kernel-source
+          git clone --depth=1 https://github.com/PARADOX-X20/kernel_xiaomi_marble.git kernel-source
 
       - name: Suntik KernelSU Next & SuSFS
         run: |
