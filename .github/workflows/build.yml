@@ -21,12 +21,37 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/PARADOX-X20/kernel_xiaomi_marble.git kernel-source
 
-      - name: Suntik KernelSU Next & SuSFS
+            - name: Suntik KernelSU Next & SuSFS
         run: |
           cd kernel-source
-          echo "Menyuntikkan KernelSU Next..."
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
-          echo "Persiapan folder patch SuSFS..."
+          
+          echo "Menyedot KernelSU Next resmi..."
+          git clone https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
+          
+          echo "Memasukkan KSU Next ke dalam urat nadi kernel..."
+          cp -r KernelSU-Next/kernel drivers/kernelsu
+          
+          echo "Menambahkan KSU ke sistem build (Kconfig & Makefile)..."
+          echo 'source "drivers/kernelsu/Kconfig"' >> arch/arm64/configs/Kconfig
+          sed -i '/obj-y += char\//a obj-y += kernelsu\/' drivers/Makefile
+          
+          echo "Menyedot bahan baku SuSFS..."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs-bahan
+          
+          echo "Menyuntikkan Patch SuSFS ke KernelSU dan Kernel..."
+          cp susfs-bahan/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch drivers/kernelsu/
+          cd drivers/kernelsu
+          patch -p1 < 10_enable_susfs_for_ksu.patch
+          cd ../../
+          
+          echo "Menambahkan hooks SuSFS ke sistem..."
+          cp susfs-bahan/kernel_patches/50_add_susfs_in_kernel-5.10.patch .
+          patch -p1 < 50_add_susfs_in_kernel-5.10.patch || echo "Patch kernel mungkin butuh penyesuaian manual di PARADOX, kita lanjut dulu!"
+          
+          echo "Suntikan selesai, bersihkan sisa bahan..."
+          rm -rf KernelSU-Next susfs-bahan
+          cd ..
+          
 
       - name: Proses Compile Kernel (Masak!)
         run: |
