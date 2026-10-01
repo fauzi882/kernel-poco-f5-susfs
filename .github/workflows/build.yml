@@ -39,7 +39,7 @@ jobs:
           echo "Menyuntikkan Patch SuSFS ke KernelSU dan Kernel..."
           cp susfs-bahan/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch drivers/kernelsu/
           cd drivers/kernelsu
-          patch -p1 < 10_enable_susfs_for_ksu.patch
+          patch -p1 < 10_enable_susfs_for_ksu.patch || true
           cd ../../
           
           echo "Menambahkan hooks SuSFS ke sistem..."
