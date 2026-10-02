@@ -5,9 +5,9 @@ on:
     inputs:
       kernel_repo:
         description: "URL repo source kernel"
-        default: "https://github.com/PARADOX-X20/kernel_xiaomi_marble.git"
+        default: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
       kernel_branch:
-        description: "Branch kernel (kosongin = default branch repo)"
+        description: "Branch kernel (kosongin = default branch repo, JANGAN ada spasi)"
         default: ""
       defconfig:
         description: "Nama file defconfig (dicari otomatis di arch/arm64/configs)"
@@ -19,6 +19,14 @@ on:
       susfs_branch:
         description: "Branch susfs4ksu (harus cocok sama versi kernel)"
         default: "gki-android12-5.10"
+      enable_nethunter_wifi:
+        description: "EKSPERIMENTAL: coba patch monitor mode WiFi (qcacld). Injection TIDAK dijamin."
+        type: boolean
+        default: true
+      enable_tweaks:
+        description: "Tambah CPU governor, TCP BBR, USB HID gadget (buat HID attack), Bluetooth config"
+        type: boolean
+        default: true
 
 jobs:
   build-kernel:
@@ -65,6 +73,16 @@ jobs:
           grep -rIl 'ksu_handle' --exclude-dir=.git fs kernel drivers/input | head -n 10 || true
           echo "=== Lokasi defconfig marble ==="
           find arch/arm64/configs -name '*marble*'
+          echo "=== Driver WiFi (qcacld) ada di mana? ==="
+          find . -maxdepth 3 -iname '*wlan*' -o -iname '*qcacld*' 2>/dev/null | grep -v '^\./\.git' | head -n 10
+          WLAN_DIR=$(find . -maxdepth 4 -type d -iname 'qcacld*' 2>/dev/null | head -n1)
+          echo "WLAN_DIR terdeteksi: ${WLAN_DIR:-(gak ketemu, berarti driver WiFi binary/di luar tree)}"
+          echo "=== Sudah ada hook monitor mode (con_mode) belum? ==="
+          grep -rIl 'con_mode' --include='*.c' . 2>/dev/null | head -n 5 || echo "(belum ada, berarti perlu dipatch manual)"
+          echo "=== USB gadget / HID tersedia gak di Kconfig ==="
+          grep -rl 'USB_CONFIGFS_F_HID\|USB_CONFIGFS' drivers/usb/gadget/Kconfig 2>/dev/null || echo "(Kconfig gadget gak ketemu di lokasi biasa)"
+          echo "=== Bluetooth Kconfig ==="
+          test -f net/bluetooth/Kconfig && echo "net/bluetooth/Kconfig ada" || echo "net/bluetooth/Kconfig gak ketemu"
 
       - name: Integrasi KernelSU Next
         working-directory: kernel-source
@@ -120,6 +138,68 @@ jobs:
           if [ -d "$SRC/include/linux" ]; then cp -rn "$SRC/include/linux/." include/linux/; fi
           test -f include/linux/susfs.h || { echo "::error::susfs.h gak ada setelah patch"; exit 1; }
 
+      - name: Patch NetHunter WiFi (monitor mode, eksperimental)
+        if: ${{ inputs.enable_nethunter_wifi }}
+        working-directory: kernel-source
+        run: |
+          # Sumber: kimocoder/qualcomm_android_monitor_mode (patch dipakai NetHunter resmi
+          # buat QCACLD-3.0). Catatan dari pembuatnya: banyak kernel vendor baru udah
+          # punya ini built-in, jadi patch bisa aja "udah diterapkan" / gak relevan.
+          # Frame injection TIDAK termasuk di patch ini - itu riset terpisah per-chip,
+          # belum ada yang konfirmasi jalan di marble. Jangan dijanjiin ke user.
+          curl -fLsS -o monitor_mode.patch \
+            https://github.com/kimocoder/qualcomm_android_monitor_mode/raw/master/files/enable_monitor_mode.patch
+
+          if patch -p1 --dry-run --forward < monitor_mode.patch > /tmp/wifi_dryrun.log 2>&1; then
+            patch -p1 --forward --no-backup-if-mismatch < monitor_mode.patch
+            echo "=== Patch monitor mode BERHASIL ditempel ==="
+          else
+            echo "=== Patch gak nempel bersih (lihat ringkasan) ==="
+            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/wifi_dryrun.log
+            if grep -qi "previously applied" /tmp/wifi_dryrun.log; then
+              echo "::notice::Kemungkinan monitor mode SUDAH built-in di source ini (sesuai catatan kimocoder). Lanjut tanpa patch."
+            else
+              echo "::warning::Patch monitor mode gak cocok sama source ini. Build tetap lanjut TANPA patch ini - cek manual nanti lewat 'echo 4 > /sys/module/wlan/parameters/con_mode' setelah boot."
+            fi
+          fi
+          rm -f monitor_mode.patch
+
+      - name: Tambah tweak (governor, TCP, USB HID, Bluetooth)
+        if: ${{ inputs.enable_tweaks }}
+        working-directory: kernel-source
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
+          test -n "$DEF_PATH" || { echo "::error::defconfig belum ketemu buat ditambah tweak"; exit 1; }
+
+          {
+            echo ""
+            echo "# --- Tweak tambahan ---"
+            # CPU governor: nyalain semua governor umum, biar bisa gonta-ganti runtime
+            # lewat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor (gak ngubah default)
+            echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
+            echo "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y"
+            echo "CONFIG_CPU_FREQ_GOV_POWERSAVE=y"
+            echo "CONFIG_CPU_FREQ_GOV_USERSPACE=y"
+            echo "CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y"
+            echo "CONFIG_CPU_FREQ_GOV_ONDEMAND=y"
+            # TCP congestion control tambahan (default tetap apa pun yang dipilih kernel,
+            # tinggal ganti runtime: sysctl net.ipv4.tcp_congestion_control=bbr)
+            echo "CONFIG_TCP_CONG_ADVANCED=y"
+            echo "CONFIG_TCP_CONG_BBR=y"
+            echo "CONFIG_TCP_CONG_WESTWOOD=y"
+            echo "CONFIG_TCP_CONG_HTCP=y"
+            echo "CONFIG_DEFAULT_BBR=y"
+            # USB gadget HID: dasar buat serangan HID/BadUSB (keystroke injection via USB)
+            echo "CONFIG_USB_CONFIGFS=y"
+            echo "CONFIG_USB_CONFIGFS_F_HID=y"
+            echo "CONFIG_HID=y"
+            # Bluetooth: pastiin subsistem inti nyala (chip BT biasanya udah didukung vendor)
+            echo "CONFIG_BT=y"
+            echo "CONFIG_BT_HCIUART=y"
+          } >> "$DEF_PATH"
+
       - name: Siapin defconfig
         working-directory: kernel-source
         env:
@@ -167,6 +247,9 @@ jobs:
           if [ "$ENABLE_SUSFS" = "true" ]; then
             grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "::error::CONFIG_KSU_SUSFS gak aktif (versi KSU Next & SuSFS mungkin gak cocok)"; exit 1; }
           fi
+
+          echo "=== Status tweak (info aja, gak bikin build gagal kalau ada yang 'n') ==="
+          grep -E "^CONFIG_(CPU_FREQ_GOV_|TCP_CONG_|DEFAULT_BBR|USB_CONFIGFS|HID=|BT=|BT_HCIUART)" out/.config || echo "(gak ada satu pun, mungkin enable_tweaks dimatiin atau nama config beda di kernel ini)"
 
           # cuma bangun Image (cukup buat AnyKernel3). Tambahin 'dtbs' di belakang kalau butuh dtb
           make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log
