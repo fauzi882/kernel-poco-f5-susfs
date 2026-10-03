@@ -273,6 +273,20 @@ jobs:
           git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
           cd rtl8188eus
 
+          # Sejak kernel ~5.9, filp_open/kernel_read dipindah ke "namespace" khusus
+          # yang cuma boleh dipake kode filesystem. Driver lama kayak gini belum
+          # declare izin pakenya, jadi ke-load tapi GAGAL di-insmod (bukan gagal compile).
+          # Fix umum dipake banyak driver sejenis (rtl8812au, 8814au) buat kernel 5.10+.
+          MLFILE=$(grep -rl '^MODULE_LICENSE' . --include='*.c' | head -n1)
+          if [ -n "$MLFILE" ]; then
+            if ! grep -q 'MODULE_IMPORT_NS' "$MLFILE"; then
+              sed -i '/^MODULE_LICENSE/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' "$MLFILE"
+              echo "MODULE_IMPORT_NS ditambahin ke: $MLFILE"
+            fi
+          else
+            echo "::warning::Gak ketemu file MODULE_LICENSE, fix namespace gak ditempel - insmod kemungkinan masih gagal."
+          fi
+
           KDIR="$GITHUB_WORKSPACE/kernel-source/out"
           # KCFLAGS=-Wno-error: source driver ini lama, masih gaya nulis if((x))
           # yang dianggap error (bukan cuma warning) sama clang baru. Sama kayak
@@ -296,7 +310,7 @@ jobs:
           cp "$KO" "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
           echo "=== Driver RTL8188EUS berhasil dibuild ==="
           ls -la "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
-          modinfo "$GITHUB_WORKSPACE/out-extra/8188eu.ko" 2>/dev/null | grep -E 'vermagic|description' || true
+          modinfo "$GITHUB_WORKSPACE/out-extra/8188eu.ko" 2>/dev/null | grep -E 'vermagic|description|import_ns' || true
 
       - name: Bungkus pakai AnyKernel3
         run: |
