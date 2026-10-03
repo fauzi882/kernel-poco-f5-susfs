@@ -274,8 +274,12 @@ jobs:
           cd rtl8188eus
 
           KDIR="$GITHUB_WORKSPACE/kernel-source/out"
+          # KCFLAGS=-Wno-error: source driver ini lama, masih gaya nulis if((x))
+          # yang dianggap error (bukan cuma warning) sama clang baru. Sama kayak
+          # perlakuan kernel utama di step Compile kernel.
           if ! make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
                 CROSS_COMPILE=aarch64-linux-gnu- KSRC="$KDIR" \
+                KCFLAGS=-Wno-error \
                 > /tmp/rtl8188eus_build.log 2>&1; then
             echo "=== Build driver RTL8188EUS GAGAL, 30 baris error terakhir: ==="
             tail -n 30 /tmp/rtl8188eus_build.log
