@@ -27,6 +27,10 @@ on:
         description: "Tambah CPU governor, TCP BBR, USB HID gadget (buat HID attack), Bluetooth config"
         type: boolean
         default: true
+      enable_rtl8188eus:
+        description: "Build driver RTL8188EUS (buat adapter eksternal TP-Link TL-WN722N v2/v3) - monitor mode + injection"
+        type: boolean
+        default: true
 
 jobs:
   build-kernel:
@@ -254,6 +258,42 @@ jobs:
           # cuma bangun Image (cukup buat AnyKernel3). Tambahin 'dtbs' di belakang kalau butuh dtb
           make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log
 
+          # siapin Module.symvers dkk biar module di luar tree (rtl8188eus) bisa nebeng build ini
+          make "${MAKE_ARGS[@]}" modules_prepare
+
+      - name: Build driver RTL8188EUS (adapter eksternal TP-Link)
+        if: ${{ inputs.enable_rtl8188eus }}
+        run: |
+          # Sumber: aircrack-ng/rtl8188eus - driver resmi komunitas aircrack-ng,
+          # satu-satunya yang monitor mode + injection-nya udah TERBUKTI jalan
+          # (beda sama chip WiFi internal yang masih tanda tanya / dikunci firmware).
+          # Dibuild sebagai module terpisah (.ko) di LUAR source kernel, numpang
+          # Module.symvers dari build Image di atas biar vermagic-nya COCOK persis
+          # sama kernel yang bakal diflash (kalau gak cocok, .ko gak mau ke-load).
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
+          cd rtl8188eus
+
+          KDIR="$GITHUB_WORKSPACE/kernel-source/out"
+          if ! make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CROSS_COMPILE=aarch64-linux-gnu- KSRC="$KDIR" \
+                > /tmp/rtl8188eus_build.log 2>&1; then
+            echo "=== Build driver RTL8188EUS GAGAL, 30 baris error terakhir: ==="
+            tail -n 30 /tmp/rtl8188eus_build.log
+            echo "::warning::Driver RTL8188EUS gagal dibuild. Kernel utama TETAP lanjut tanpa ini - adapter eksternal belum bisa dipakai, tapi gak ngaruh ke kernel/KSU/SuSFS."
+            exit 0
+          fi
+
+          KO=$(find . -name '8188eu.ko' | head -n1)
+          if [ -z "$KO" ]; then
+            echo "::warning::Build 'sukses' tapi 8188eu.ko gak ketemu - cek log build manual."
+            exit 0
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/out-extra"
+          cp "$KO" "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
+          echo "=== Driver RTL8188EUS berhasil dibuild ==="
+          ls -la "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
+          modinfo "$GITHUB_WORKSPACE/out-extra/8188eu.ko" 2>/dev/null | grep -E 'vermagic|description' || true
+
       - name: Bungkus pakai AnyKernel3
         run: |
           IMG=kernel-source/out/arch/arm64/boot/Image
@@ -285,6 +325,14 @@ jobs:
           name: CustomKernel-Marble-Siap-Flash
           path: ${{ env.ZIP_NAME }}
 
+      - name: Upload driver RTL8188EUS (kalau berhasil dibuild)
+        if: ${{ inputs.enable_rtl8188eus }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTL8188EUS-Module
+          path: out-extra/8188eu.ko
+          if-no-files-found: ignore
+
       - name: Upload log kalau gagal
         if: failure()
         uses: actions/upload-artifact@v4
@@ -292,3 +340,4 @@ jobs:
           name: build-log
           path: kernel-source/build.log
           if-no-files-found: ignore
+          
