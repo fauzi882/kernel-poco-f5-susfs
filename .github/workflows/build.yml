@@ -1,0 +1,361 @@
+name: Build Custom Kernel (Marble + KSU Next)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "URL repo source kernel"
+        default: "https://github.com/Pzqqt/android_kernel_xiaomi_marble.git"
+      kernel_branch:
+        description: "Branch kernel (kosongin = default branch repo, JANGAN ada spasi)"
+        default: ""
+      defconfig:
+        description: "Nama file defconfig (dicari otomatis di arch/arm64/configs)"
+        default: "marble_defconfig"
+      enable_susfs:
+        description: "Aktifin SuSFS? (run pertama matiin dulu buat tes build polos)"
+        type: boolean
+        default: true
+      susfs_branch:
+        description: "Branch susfs4ksu (harus cocok sama versi kernel)"
+        default: "gki-android12-5.10"
+      enable_nethunter_wifi:
+        description: "EKSPERIMENTAL: coba patch monitor mode WiFi (qcacld). Injection TIDAK dijamin."
+        type: boolean
+        default: true
+      enable_tweaks:
+        description: "Tambah CPU governor, TCP BBR, USB HID gadget (buat HID attack), Bluetooth config"
+        type: boolean
+        default: true
+      enable_rtl8188eus:
+        description: "Build driver RTL8188EUS (buat adapter eksternal TP-Link TL-WN722N v2/v3) - monitor mode + injection"
+        type: boolean
+        default: true
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash   # otomatis pakai -e -o pipefail
+    env:
+      ZIP_NAME: Marble-KSUNext-${{ github.run_number }}.zip
+
+    steps:
+      - name: Setup environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git bc bison flex make zip curl cpio rsync xz-utils lz4 lzop \
+            libssl-dev libelf-dev libncurses-dev device-tree-compiler python3 \
+            clang lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          clang --version | head -n1
+
+      - name: Clone kernel source
+        env:
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
+          KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+        run: |
+          if [ -n "$KERNEL_BRANCH" ]; then
+            git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel-source
+          else
+            git clone --depth=1 "$KERNEL_REPO" kernel-source
+          fi
+
+      - name: Diagnosa source kernel
+        working-directory: kernel-source
+        run: |
+          echo "=== Versi kernel ==="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) ' Makefile || true
+          git log -1 --format='%h %s (%cd)' || true
+          echo "=== Branch yang ada di repo ==="
+          git ls-remote --heads origin | sed 's|.*refs/heads/||' | head -n 30 || true
+          echo "=== Source ini UDAH ada SuSFS / KSU belum? ==="
+          grep -rIl -i susfs --exclude-dir=.git --include='*.c' --include='*.h' --include='Kconfig' --include='Makefile' . | head -n 15 || true
+          ls -d drivers/kernelsu* 2>/dev/null || echo "(gak ada drivers/kernelsu)"
+          grep -rIl 'ksu_handle' --exclude-dir=.git fs kernel drivers/input | head -n 10 || true
+          echo "=== Lokasi defconfig marble ==="
+          find arch/arm64/configs -name '*marble*'
+          echo "=== Driver WiFi (qcacld) ada di mana? ==="
+          find . -maxdepth 3 -iname '*wlan*' -o -iname '*qcacld*' 2>/dev/null | grep -v '^\./\.git' | head -n 10
+          WLAN_DIR=$(find . -maxdepth 4 -type d -iname 'qcacld*' 2>/dev/null | head -n1)
+          echo "WLAN_DIR terdeteksi: ${WLAN_DIR:-(gak ketemu, berarti driver WiFi binary/di luar tree)}"
+          echo "=== Sudah ada hook monitor mode (con_mode) belum? ==="
+          grep -rIl 'con_mode' --include='*.c' . 2>/dev/null | head -n 5 || echo "(belum ada, berarti perlu dipatch manual)"
+          echo "=== USB gadget / HID tersedia gak di Kconfig ==="
+          grep -rl 'USB_CONFIGFS_F_HID\|USB_CONFIGFS' drivers/usb/gadget/Kconfig 2>/dev/null || echo "(Kconfig gadget gak ketemu di lokasi biasa)"
+          echo "=== Bluetooth Kconfig ==="
+          test -f net/bluetooth/Kconfig && echo "net/bluetooth/Kconfig ada" || echo "net/bluetooth/Kconfig gak ketemu"
+
+      - name: Integrasi KernelSU Next
+        working-directory: kernel-source
+        env:
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+        run: |
+          # setup.sh: clone KSU Next, bikin symlink drivers/kernelsu,
+          # dan otomatis nambah entry ke drivers/Makefile + drivers/Kconfig
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            # KSU Next yang udah bawa glue SuSFS sekarang ada di fork pershoot (branch dev-susfs).
+            # Branch lama "next-susfs" di repo KernelSU-Next resmi udah 404, itu penyebab error sebelumnya.
+            # Karena udah bawa SuSFS, patch 10_enable_susfs_for_ksu GAK dipakai.
+            SETUP_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh"
+            KSU_REF="dev-susfs"
+          else
+            SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
+            KSU_REF="dev"
+          fi
+          # -f = kalau 404 langsung gagal. Tanpa ini, tulisan "404: Not Found"
+          # malah dijalanin sebagai script (itu yang muncul "404:: command not found")
+          curl -fLsS "$SETUP_URL" -o setup.sh
+          bash setup.sh "$KSU_REF"
+          rm -f setup.sh
+          test -e drivers/kernelsu/Kconfig || { echo "::error::KSU Next gagal terintegrasi"; exit 1; }
+          grep -n kernelsu drivers/Makefile drivers/Kconfig
+
+      - name: Patch SuSFS ke kernel
+        if: ${{ inputs.enable_susfs }}
+        working-directory: kernel-source
+        env:
+          SUSFS_BRANCH: ${{ inputs.susfs_branch }}
+        run: |
+          git clone --depth=1 -b "$SUSFS_BRANCH" https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          PATCH=$(ls ../susfs4ksu/kernel_patches/50_add_susfs_in_*.patch | head -n1)
+          echo "Pakai patch: $PATCH"
+
+          # tes dulu tanpa nyentuh file; kalau ada hunk gagal, langsung stop (gak ditutupin lagi)
+          if ! patch -p1 --dry-run --forward < "$PATCH" > /tmp/dryrun.log 2>&1; then
+            echo "=== RINGKASAN: file yang gagal di-patch ==="
+            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/dryrun.log
+            echo "=== Jumlah hunk yang kebaca 'udah ke-patch' (tanda source udah ada SuSFS) ==="
+            grep -c -i "previously applied" /tmp/dryrun.log || true
+            echo "::error::Patch SuSFS gak cocok sama source kernel ini (lihat ringkasan di atas)."
+            exit 1
+          fi
+          patch -p1 --forward --no-backup-if-mismatch < "$PATCH"
+          find . -name '*.rej' | grep . && exit 1 || true
+
+          # SuSFS versi baru nyimpen susfs.c / susfs.h di folder terpisah (bukan di dalam patch).
+          # cp -n = gak nimpa kalau file-nya ternyata udah dibuat sama patch.
+          SRC=../susfs4ksu/kernel_patches
+          if [ -d "$SRC/fs" ]; then cp -rn "$SRC/fs/." fs/; fi
+          if [ -d "$SRC/include/linux" ]; then cp -rn "$SRC/include/linux/." include/linux/; fi
+          test -f include/linux/susfs.h || { echo "::error::susfs.h gak ada setelah patch"; exit 1; }
+
+      - name: Patch NetHunter WiFi (monitor mode, eksperimental)
+        if: ${{ inputs.enable_nethunter_wifi }}
+        working-directory: kernel-source
+        run: |
+          # Sumber: kimocoder/qualcomm_android_monitor_mode (patch dipakai NetHunter resmi
+          # buat QCACLD-3.0). Catatan dari pembuatnya: banyak kernel vendor baru udah
+          # punya ini built-in, jadi patch bisa aja "udah diterapkan" / gak relevan.
+          # Frame injection TIDAK termasuk di patch ini - itu riset terpisah per-chip,
+          # belum ada yang konfirmasi jalan di marble. Jangan dijanjiin ke user.
+          curl -fLsS -o monitor_mode.patch \
+            https://github.com/kimocoder/qualcomm_android_monitor_mode/raw/master/files/enable_monitor_mode.patch
+
+          if patch -p1 --dry-run --forward < monitor_mode.patch > /tmp/wifi_dryrun.log 2>&1; then
+            patch -p1 --forward --no-backup-if-mismatch < monitor_mode.patch
+            echo "=== Patch monitor mode BERHASIL ditempel ==="
+          else
+            echo "=== Patch gak nempel bersih (lihat ringkasan) ==="
+            awk '/^checking file/{f=$3} /out of .* hunks? FAILED/{print f": "$0}' /tmp/wifi_dryrun.log
+            if grep -qi "previously applied" /tmp/wifi_dryrun.log; then
+              echo "::notice::Kemungkinan monitor mode SUDAH built-in di source ini (sesuai catatan kimocoder). Lanjut tanpa patch."
+            else
+              echo "::warning::Patch monitor mode gak cocok sama source ini. Build tetap lanjut TANPA patch ini - cek manual nanti lewat 'echo 4 > /sys/module/wlan/parameters/con_mode' setelah boot."
+            fi
+          fi
+          rm -f monitor_mode.patch
+
+      - name: Tambah tweak (governor, TCP, USB HID, Bluetooth)
+        if: ${{ inputs.enable_tweaks }}
+        working-directory: kernel-source
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
+          test -n "$DEF_PATH" || { echo "::error::defconfig belum ketemu buat ditambah tweak"; exit 1; }
+
+          {
+            echo ""
+            echo "# --- Tweak tambahan ---"
+            # CPU governor: nyalain semua governor umum, biar bisa gonta-ganti runtime
+            # lewat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor (gak ngubah default)
+            echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
+            echo "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y"
+            echo "CONFIG_CPU_FREQ_GOV_POWERSAVE=y"
+            echo "CONFIG_CPU_FREQ_GOV_USERSPACE=y"
+            echo "CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y"
+            echo "CONFIG_CPU_FREQ_GOV_ONDEMAND=y"
+            # TCP congestion control tambahan (default tetap apa pun yang dipilih kernel,
+            # tinggal ganti runtime: sysctl net.ipv4.tcp_congestion_control=bbr)
+            echo "CONFIG_TCP_CONG_ADVANCED=y"
+            echo "CONFIG_TCP_CONG_BBR=y"
+            echo "CONFIG_TCP_CONG_WESTWOOD=y"
+            echo "CONFIG_TCP_CONG_HTCP=y"
+            echo "CONFIG_DEFAULT_BBR=y"
+            # USB gadget HID: dasar buat serangan HID/BadUSB (keystroke injection via USB)
+            echo "CONFIG_USB_CONFIGFS=y"
+            echo "CONFIG_USB_CONFIGFS_F_HID=y"
+            echo "CONFIG_HID=y"
+            # Bluetooth: pastiin subsistem inti nyala (chip BT biasanya udah didukung vendor)
+            echo "CONFIG_BT=y"
+            echo "CONFIG_BT_HCIUART=y"
+          } >> "$DEF_PATH"
+
+      - name: Siapin defconfig
+        working-directory: kernel-source
+        env:
+          DEFCONFIG: ${{ inputs.defconfig }}
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+        run: |
+          DEF_PATH=$(find arch/arm64/configs -name "$DEFCONFIG" | head -n1)
+          if [ -z "$DEF_PATH" ]; then
+            echo "::error::defconfig $DEFCONFIG gak ketemu. Isi folder configs:"
+            find arch/arm64/configs -name '*marble*'
+            exit 1
+          fi
+          echo "DEFCONFIG_REL=${DEF_PATH#arch/arm64/configs/}" >> "$GITHUB_ENV"
+
+          # tanpa ini KSU gak ikut ke-compile sama sekali
+          {
+            echo ""
+            echo "CONFIG_KSU=y"
+          } >> "$DEF_PATH"
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            echo "CONFIG_KSU_SUSFS=y" >> "$DEF_PATH"
+          fi
+
+      - name: Compile kernel
+        working-directory: kernel-source
+        env:
+          ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+        run: |
+          # CC harus lewat argumen make (export CC=clang di-override sama Makefile kernel)
+          MAKE_ARGS=(
+            O=out ARCH=arm64
+            LLVM=1 LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            KCFLAGS=-Wno-error   # clang baru sering protes warning di source lama
+          )
+
+          make "${MAKE_ARGS[@]}" "$DEFCONFIG_REL"
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          echo "=== Cek config KSU ==="
+          grep -E "^CONFIG_KSU" out/.config || true
+          grep -q "^CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU gak aktif di .config"; exit 1; }
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            grep -q "^CONFIG_KSU_SUSFS=y" out/.config || { echo "::error::CONFIG_KSU_SUSFS gak aktif (versi KSU Next & SuSFS mungkin gak cocok)"; exit 1; }
+          fi
+
+          echo "=== Status tweak (info aja, gak bikin build gagal kalau ada yang 'n') ==="
+          grep -E "^CONFIG_(CPU_FREQ_GOV_|TCP_CONG_|DEFAULT_BBR|USB_CONFIGFS|HID=|BT=|BT_HCIUART)" out/.config || echo "(gak ada satu pun, mungkin enable_tweaks dimatiin atau nama config beda di kernel ini)"
+
+          # cuma bangun Image (cukup buat AnyKernel3). Tambahin 'dtbs' di belakang kalau butuh dtb
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log
+
+          # siapin Module.symvers dkk biar module di luar tree (rtl8188eus) bisa nebeng build ini
+          make "${MAKE_ARGS[@]}" modules_prepare
+
+      - name: Build driver RTL8188EUS (adapter eksternal TP-Link)
+        if: ${{ inputs.enable_rtl8188eus }}
+        run: |
+          # Sumber: aircrack-ng/rtl8188eus - driver resmi komunitas aircrack-ng,
+          # satu-satunya yang monitor mode + injection-nya udah TERBUKTI jalan
+          # (beda sama chip WiFi internal yang masih tanda tanya / dikunci firmware).
+          # Dibuild sebagai module terpisah (.ko) di LUAR source kernel, numpang
+          # Module.symvers dari build Image di atas biar vermagic-nya COCOK persis
+          # sama kernel yang bakal diflash (kalau gak cocok, .ko gak mau ke-load).
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
+          cd rtl8188eus
+
+          # Sejak kernel ~5.9, filp_open/kernel_read dipindah ke "namespace" khusus
+          # yang cuma boleh dipake kode filesystem. Driver lama kayak gini belum
+          # declare izin pakenya, jadi ke-load tapi GAGAL di-insmod (bukan gagal compile).
+          # Fix umum dipake banyak driver sejenis (rtl8812au, 8814au) buat kernel 5.10+.
+          MLFILE=$(grep -rl '^MODULE_LICENSE' . --include='*.c' | head -n1)
+          if [ -n "$MLFILE" ]; then
+            if ! grep -q 'MODULE_IMPORT_NS' "$MLFILE"; then
+              sed -i '/^MODULE_LICENSE/a MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);' "$MLFILE"
+              echo "MODULE_IMPORT_NS ditambahin ke: $MLFILE"
+            fi
+          else
+            echo "::warning::Gak ketemu file MODULE_LICENSE, fix namespace gak ditempel - insmod kemungkinan masih gagal."
+          fi
+
+          KDIR="$GITHUB_WORKSPACE/kernel-source/out"
+          # KCFLAGS=-Wno-error: source driver ini lama, masih gaya nulis if((x))
+          # yang dianggap error (bukan cuma warning) sama clang baru. Sama kayak
+          # perlakuan kernel utama di step Compile kernel.
+          if ! make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                CROSS_COMPILE=aarch64-linux-gnu- KSRC="$KDIR" \
+                KCFLAGS=-Wno-error \
+                > /tmp/rtl8188eus_build.log 2>&1; then
+            echo "=== Build driver RTL8188EUS GAGAL, 30 baris error terakhir: ==="
+            tail -n 30 /tmp/rtl8188eus_build.log
+            echo "::warning::Driver RTL8188EUS gagal dibuild. Kernel utama TETAP lanjut tanpa ini - adapter eksternal belum bisa dipakai, tapi gak ngaruh ke kernel/KSU/SuSFS."
+            exit 0
+          fi
+
+          KO=$(find . -name '8188eu.ko' | head -n1)
+          if [ -z "$KO" ]; then
+            echo "::warning::Build 'sukses' tapi 8188eu.ko gak ketemu - cek log build manual."
+            exit 0
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/out-extra"
+          cp "$KO" "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
+          echo "=== Driver RTL8188EUS berhasil dibuild ==="
+          ls -la "$GITHUB_WORKSPACE/out-extra/8188eu.ko"
+          modinfo "$GITHUB_WORKSPACE/out-extra/8188eu.ko" 2>/dev/null | grep -E 'vermagic|description|import_ns' || true
+
+      - name: Bungkus pakai AnyKernel3
+        run: |
+          IMG=kernel-source/out/arch/arm64/boot/Image
+          test -f "$IMG" || { echo "::error::Image gak kebentuk"; exit 1; }
+
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp "$IMG" AnyKernel3/Image
+          cd AnyKernel3
+
+          # default AnyKernel3 isinya device 'maguro' -> kalau gak diganti, flash pasti ditolak
+          sed -i \
+            -e 's|^kernel.string=.*|kernel.string=Custom Kernel Marble (KSU Next)|' \
+            -e 's|^do.modules=.*|do.modules=0|' \
+            -e 's|^device.name1=.*|device.name1=marble|' \
+            -e 's|^device.name2=.*|device.name2=marblein|' \
+            -e 's|^device.name3=.*|device.name3=|' \
+            -e 's|^device.name4=.*|device.name4=|' \
+            -e 's|^device.name5=.*|device.name5=|' \
+            -e 's|^BLOCK=.*|BLOCK=boot;|' \
+            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=auto;|' \
+            anykernel.sh
+          grep -nE '^(kernel.string|device.name|BLOCK|IS_SLOT_DEVICE)' anykernel.sh
+
+          zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*placeholder'
+
+      - name: Upload hasil akhir (ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomKernel-Marble-Siap-Flash
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Upload driver RTL8188EUS (kalau berhasil dibuild)
+        if: ${{ inputs.enable_rtl8188eus }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTL8188EUS-Module
+          path: out-extra/8188eu.ko
+          if-no-files-found: ignore
+
+      - name: Upload log kalau gagal
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel-source/build.log
+          if-no-files-found: ignore
+          
