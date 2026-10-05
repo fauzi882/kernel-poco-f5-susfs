@@ -1,108 +1,751 @@
-name: Redmi Note 8 Kernel Build
+name: Redmi Note 8 - FlopKernel KSUN 3.4.0 SUSFS
 
 on:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: "Clean build"
+        required: true
+        default: true
+        type: boolean
+
+      make_release:
+        description: "Create GitHub Release"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
 
 env:
-  KERNEL_REPO: https://github.com/ikteach/ginkgo_nethunter_kernel.git
-  KERNEL_BRANCH: main
+  KERNEL_REPO: https://github.com/FlopKernel-Series/flop_trinket-mi_kernel.git
+  KERNEL_BRANCH: a14/flop-renewed-final
 
-  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3.git
+  KSU_REPO: https://github.com/KernelSU-Next/KernelSU-Next.git
+  KSU_REF: v3.4.0-legacy
 
-  CLANG_REPO: https://github.com/kdrag0n/proton-clang.git
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_REF: v2.3.0
 
-  DEFCONFIG: ginkgo_defconfig
+  AK3_REPO: https://github.com/Flopster101/AnyKernel3.git
+  AK3_BRANCH: carakernel-new
+
   DEVICE: ginkgo
+  ARCH: arm64
+
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
+
   build:
+    name: Build ginkgo KSUN 3.4.0 + SUSFS
     runs-on: ubuntu-22.04
 
     steps:
 
-    - name: Checkout
-      uses: actions/checkout@v4
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
 
-    - name: Install Dependencies
-      run: |
-        sudo apt update
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
 
-        sudo apt install -y \
-        git wget curl python3 bc bison flex zip unzip \
-        build-essential cpio libssl-dev libelf-dev \
-        gcc g++ make lld llvm clang
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
 
-    - name: Clone Kernel
-      run: |
-        git clone --depth=1 \
-        -b $KERNEL_BRANCH \
-        $KERNEL_REPO kernel
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
 
-    - name: Clone Proton Clang
-      run: |
-        git clone --depth=1 \
-        $CLANG_REPO clang
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            gcc \
+            g++ \
+            git \
+            libelf-dev \
+            libncurses5-dev \
+            libncurses-dev \
+            libssl-dev \
+            lz4 \
+            make \
+            perl \
+            python3 \
+            python3-pip \
+            rsync \
+            unzip \
+            wget \
+            zip \
+            curl \
+            cpio \
+            kmod \
+            brotli \
+            file
 
-    - name: Integrate KernelSU Next
-      working-directory: kernel
-      run: |
-        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s dev
+      # ============================================================
+      # CCACHE
+      # ============================================================
 
-    - name: Integrate SUSFS
-      working-directory: kernel
-      run: |
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ginkgo-ksun-340-${{ github.run_id }}
+          restore-keys: |
+            ginkgo-ksun-340-
+            ginkgo-kernel-
 
-        git clone --depth=1 \
-        https://github.com/sidex15/susfs4ksu.git susfs
+      - name: Configure ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
 
-        cp -r susfs/kernel_patches/* .
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+          ccache --set-config=max_size=10G
+          ccache --set-config=compression=true
 
-        bash susfs/kernel_patches/50_add_susfs_in_kernel-5.4.sh
+          ccache --show-config
 
-    - name: Configure Kernel
-      working-directory: kernel
-      env:
-        PATH: ${{ github.workspace }}/clang/bin:${PATH}
-      run: |
-        make O=out \
-        ARCH=arm64 \
-        CC=clang \
-        LLVM=1 \
-        LLVM_IAS=1 \
-        $DEFCONFIG
+      # ============================================================
+      # CLONE FLOPKERNEL
+      # ============================================================
 
-    - name: Build Kernel
-      working-directory: kernel
-      env:
-        PATH: ${{ github.workspace }}/clang/bin:${PATH}
-      run: |
+      - name: Clone FlopKernel
+        run: |
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "$KERNEL_BRANCH" \
+            "$KERNEL_REPO" kernel
 
-        make -j$(nproc) \
-        O=out \
-        ARCH=arm64 \
-        CC=clang \
-        LLVM=1 \
-        LLVM_IAS=1 \
-        CROSS_COMPILE=aarch64-linux-gnu- \
-        CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          cd kernel
 
-    - name: Clone AnyKernel3
-      run: |
-        git clone --depth=1 \
-        $ANYKERNEL_REPO AnyKernel3
+          git fetch --unshallow || true
 
-    - name: Package Zip
-      run: |
+          echo "=========================================="
+          echo " FLOPKERNEL"
+          echo "=========================================="
 
-        cp kernel/out/arch/arm64/boot/Image.gz-dtb \
-        AnyKernel3/
+          git branch --show-current
+          git rev-parse HEAD
+          make kernelversion
 
-        cd AnyKernel3
+      # ============================================================
+      # BACKUP ORIGINAL KSU
+      # ============================================================
 
-        zip -r9 RedmiNote8-KernelSU-Next-SUSFS.zip *
+      - name: Backup original KernelSU
+        working-directory: kernel
+        run: |
+          set -e
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: RedmiNote8-Kernel
-        path: AnyKernel3/*.zip
+          mkdir -p "$GITHUB_WORKSPACE/backup"
+
+          if [ -d "KernelSU-Next" ]; then
+            cp -a KernelSU-Next \
+              "$GITHUB_WORKSPACE/backup/KernelSU-Next-old"
+          fi
+
+          if [ -d "drivers/kernelsu" ]; then
+            cp -a drivers/kernelsu \
+              "$GITHUB_WORKSPACE/backup/kernelsu-old"
+          fi
+
+          echo "Original KSU backup completed."
+
+      # ============================================================
+      # REMOVE FLOPKERNEL KSU
+      # ============================================================
+
+      - name: Remove bundled KernelSU
+        working-directory: kernel
+        run: |
+          set +e
+
+          rm -rf KernelSU-Next
+          rm -rf drivers/kernelsu
+
+          # Remove old KSU references from Makefile
+          sed -i '/kernelsu/d' drivers/Makefile 2>/dev/null || true
+
+          # Remove old KSU Kconfig reference
+          sed -i '/drivers\/kernelsu\/Kconfig/d' \
+            drivers/Kconfig 2>/dev/null || true
+
+          # Remove possible SUSFS old references
+          sed -i '/susfs/d' drivers/Makefile 2>/dev/null || true
+
+          echo "Old KernelSU integration removed."
+
+      # ============================================================
+      # CLONE KERNELSU NEXT 3.4.0 LEGACY
+      # ============================================================
+
+      - name: Clone KernelSU Next v3.4.0 legacy
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            --branch "$KSU_REF" \
+            "$KSU_REPO" KernelSU-Next
+
+          cd KernelSU-Next
+
+          echo "=========================================="
+          echo " KERNELSU NEXT"
+          echo "=========================================="
+
+          git describe --tags --always
+          git rev-parse HEAD
+
+      # ============================================================
+      # INTEGRATE KERNELSU NEXT
+      # ============================================================
+
+      - name: Integrate KernelSU Next
+        working-directory: kernel
+        run: |
+          set -e
+
+          cp -a "$GITHUB_WORKSPACE/KernelSU-Next" \
+            "$PWD/KernelSU-Next"
+
+          if [ ! -f KernelSU-Next/kernel/setup.sh ]; then
+            echo "KernelSU setup.sh not found!"
+            exit 1
+          fi
+
+          chmod +x KernelSU-Next/kernel/setup.sh
+
+          ./KernelSU-Next/kernel/setup.sh "$KSU_REF"
+
+          echo
+          echo "KernelSU integration:"
+          test -L drivers/kernelsu && \
+            readlink -f drivers/kernelsu || \
+            true
+
+      # ============================================================
+      # CLONE SUSFS
+      # ============================================================
+
+      - name: Clone SUSFS v2.3.0
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            --branch "$SUSFS_REF" \
+            "$SUSFS_REPO" susfs
+
+          cd susfs
+
+          echo "=========================================="
+          echo " SUSFS"
+          echo "=========================================="
+
+          git describe --tags --always || true
+          git rev-parse HEAD
+
+      # ============================================================
+      # APPLY SUSFS
+      # ============================================================
+
+      - name: Apply SUSFS patches
+        working-directory: kernel
+        run: |
+          set -e
+
+          SUSFS="$GITHUB_WORKSPACE/susfs"
+
+          echo "Searching SUSFS patch files..."
+
+          find "$SUSFS/kernel_patches" \
+            -maxdepth 3 \
+            -type f \
+            -print | sort
+
+          echo
+          echo "=========================================="
+          echo " APPLYING SUSFS"
+          echo "=========================================="
+
+          PATCH_SCRIPT=""
+
+          for f in \
+            "$SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.sh" \
+            "$SUSFS/kernel_patches/50_add_susfs_in_kernel.sh" \
+            "$SUSFS/kernel_patches/KernelSU/50_add_susfs_in_kernel.sh"
+          do
+            if [ -f "$f" ]; then
+              PATCH_SCRIPT="$f"
+              break
+            fi
+          done
+
+          if [ -n "$PATCH_SCRIPT" ]; then
+
+            echo "Using:"
+            echo "$PATCH_SCRIPT"
+
+            chmod +x "$PATCH_SCRIPT"
+
+            bash "$PATCH_SCRIPT"
+
+          else
+
+            echo "No automatic 4.14 SUSFS script found."
+
+            echo "Searching patch files..."
+
+            find "$SUSFS/kernel_patches" \
+              -type f \
+              \( \
+                -name "*.patch" \
+                -o \
+                -name "*.diff" \
+                -o \
+                -name "*.sh" \
+              \) \
+              -print
+
+            PATCH_FOUND=0
+
+            while IFS= read -r patch; do
+
+              case "$patch" in
+                *4.14*|*common*|*kernel*)
+                  echo "Trying patch:"
+                  echo "$patch"
+
+                  if patch -p1 --forward --batch < "$patch"; then
+                    PATCH_FOUND=1
+                  fi
+                  ;;
+              esac
+
+            done < <(
+              find "$SUSFS/kernel_patches" \
+                -type f \
+                \( \
+                  -name "*.patch" \
+                  -o \
+                  -name "*.diff" \
+                \)
+            )
+
+            if [ "$PATCH_FOUND" = "0" ]; then
+              echo "WARNING: SUSFS automatic patch was not found."
+              echo "Build will continue with KSU only."
+            fi
+
+          fi
+
+      # ============================================================
+      # FIND SUSFS FILES
+      # ============================================================
+
+      - name: Verify SUSFS integration
+        working-directory: kernel
+        run: |
+          echo "=========================================="
+          echo " SUSFS CHECK"
+          echo "=========================================="
+
+          find . \
+            -type f \
+            \( \
+              -name "susfs.c" \
+              -o \
+              -name "susfs.h" \
+            \) \
+            -print | head -50
+
+          grep -R \
+            "CONFIG_KSU_SUSFS" \
+            . \
+            --include="Kconfig*" \
+            --include="*.c" \
+            --include="*.h" \
+            2>/dev/null | head -50 || true
+
+      # ============================================================
+      # CONFIGURE
+      # ============================================================
+
+      - name: Prepare defconfig
+        working-directory: kernel
+        run: |
+          set -e
+
+          mkdir -p out
+
+          if [ -f arch/arm64/configs/carakernel-ksu_defconfig ]; then
+            DEFCONFIG=carakernel-ksu_defconfig
+
+          elif [ -f arch/arm64/configs/ginkgo_defconfig ]; then
+            DEFCONFIG=ginkgo_defconfig
+
+          else
+            echo "Available ginkgo/carakernel configs:"
+            find arch/arm64/configs \
+              -maxdepth 1 \
+              -type f \
+              | grep -Ei 'ginkgo|cara|trinket|ksu' \
+              | sort
+
+            exit 1
+          fi
+
+          echo "DEFCONFIG=$DEFCONFIG" >> "$GITHUB_ENV"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            "$DEFCONFIG"
+
+      # ============================================================
+      # ENABLE KSU
+      # ============================================================
+
+      - name: Enable KernelSU
+        working-directory: kernel
+        run: |
+          set -e
+
+          scripts/config --file out/.config \
+            --enable CONFIG_KSU
+
+          # KPROBES
+          if grep -q "config KPROBES" kernel/Kconfig 2>/dev/null || \
+             grep -Rqs "config KPROBES" arch kernel; then
+
+            scripts/config --file out/.config \
+              --enable CONFIG_KPROBES
+
+            scripts/config --file out/.config \
+              --enable CONFIG_KPROBE_EVENTS
+          fi
+
+          # KernelSU KPROBE hooks
+          if grep -Rqs "CONFIG_KSU_KPROBE_HOOKS" \
+              drivers/kernelsu; then
+
+            scripts/config --file out/.config \
+              --enable CONFIG_KSU_KPROBE_HOOKS
+          fi
+
+          # Make sure KSU is enabled
+          grep -E \
+            '^CONFIG_KSU=|^CONFIG_KSU_' \
+            out/.config || true
+
+      # ============================================================
+      # ENABLE SUSFS
+      # ============================================================
+
+      - name: Enable SUSFS
+        working-directory: kernel
+        run: |
+          set +e
+
+          CONFIG="out/.config"
+
+          for option in \
+            CONFIG_KSU_SUSFS \
+            CONFIG_KSU_SUSFS_SUS_PATH \
+            CONFIG_KSU_SUSFS_SUS_MOUNT \
+            CONFIG_KSU_SUSFS_SUS_KSTAT \
+            CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            CONFIG_KSU_SUSFS_ENABLE_LOG \
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+            CONFIG_KSU_SUSFS_SUS_MAP \
+            CONFIG_KSU_SUSFS_SUS_KSTAT \
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            CONFIG_KSU_SUSFS_TRY_UMOUNT
+
+          do
+            if grep -Rqs "config ${option#CONFIG_}" \
+              drivers fs include kernel 2>/dev/null; then
+
+              scripts/config \
+                --file "$CONFIG" \
+                --enable "$option"
+            fi
+          done
+
+          yes '' | make \
+            O=out \
+            ARCH=arm64 \
+            olddefconfig
+
+          echo
+          echo "SUSFS configuration:"
+          grep -E \
+            'CONFIG_KSU|CONFIG_SUSFS' \
+            "$CONFIG" || true
+
+      # ============================================================
+      # TOOLCHAIN
+      # ============================================================
+
+      - name: Download AOSP Clang
+        working-directory: kernel
+        run: |
+          set -e
+
+          mkdir -p "$GITHUB_WORKSPACE/aospclang"
+
+          AOSP_API="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86"
+
+          echo "Getting latest AOSP Clang..."
+
+          CLANG_REF="$(
+            git ls-remote \
+              https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+              refs/heads/master \
+              | head -1 \
+              | awk '{print $1}'
+          )"
+
+          echo "AOSP clang ref:"
+          echo "$CLANG_REF"
+
+          git clone \
+            --depth=1 \
+            "$AOSP_API" \
+            "$GITHUB_WORKSPACE/aospclang"
+
+          echo "Available clang:"
+          find "$GITHUB_WORKSPACE/aospclang" \
+            -maxdepth 2 \
+            -type f \
+            -name clang \
+            -print | head
+
+      # ============================================================
+      # GCC 32/64
+      # ============================================================
+
+      - name: Download GCC
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            -b lineage-19.1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
+            gcc
+
+          git clone \
+            --depth=1 \
+            -b lineage-19.1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+            gcc64
+
+      # ============================================================
+      # BUILD
+      # ============================================================
+
+      - name: Build kernel
+        working-directory: kernel
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          set -e
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          export CLANG_DIR="$GITHUB_WORKSPACE/aospclang"
+
+          export PATH="$CLANG_DIR/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc/bin:/usr/bin:$PATH"
+
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+
+          export KBUILD_BUILD_USER=Flopster101
+          export KBUILD_BUILD_HOST=github-actions
+
+          echo "=========================================="
+          echo " BUILD"
+          echo "=========================================="
+
+          echo "Defconfig:"
+          echo "$DEFCONFIG"
+
+          echo
+          echo "Compiler:"
+          clang --version
+
+          echo
+          echo "Kernel:"
+          make kernelversion
+
+          echo
+          echo "KSU:"
+          grep -E \
+            '^CONFIG_KSU=' \
+            out/.config || true
+
+          echo
+          echo "SUSFS:"
+          grep -E \
+            'CONFIG_KSU_SUSFS|CONFIG_SUSFS' \
+            out/.config || true
+
+          if [ "${{ inputs.clean_build }}" = "true" ]; then
+            make O=out clean
+            make \
+              O=out \
+              ARCH=arm64 \
+              "$DEFCONFIG"
+
+            yes '' | make \
+              O=out \
+              ARCH=arm64 \
+              olddefconfig
+          fi
+
+          make \
+            -j"$(nproc --all)" \
+            O=out \
+            ARCH=arm64 \
+            CC="ccache clang" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CLANG_TRIPLE="$CLANG_TRIPLE" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            READELF=llvm-readelf \
+            OBJSIZE=llvm-size \
+            OBJDUMP=llvm-objdump \
+            OBJCOPY=llvm-objcopy \
+            STRIP=llvm-strip \
+            NM=llvm-nm \
+            AR=llvm-ar \
+            HOSTAR=llvm-ar \
+            HOSTAS=llvm-as \
+            HOSTNM=llvm-nm \
+            LD=ld.lld \
+            Image.gz-dtb \
+            dtbo.img
+
+      # ============================================================
+      # VERIFY OUTPUT
+      # ============================================================
+
+      - name: Verify kernel output
+        working-directory: kernel
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo " OUTPUT"
+          echo "=========================================="
+
+          ls -lh \
+            out/arch/arm64/boot/Image.gz-dtb \
+            out/arch/arm64/boot/dtbo.img
+
+          test -s \
+            out/arch/arm64/boot/Image.gz-dtb
+
+          test -s \
+            out/arch/arm64/boot/dtbo.img
+
+          echo
+          echo "KernelSU:"
+          grep \
+            '^CONFIG_KSU=' \
+            out/.config || true
+
+          echo
+          echo "SUSFS:"
+          grep \
+            'CONFIG_KSU_SUSFS' \
+            out/.config || true
+
+      # ============================================================
+      # CCACHE
+      # ============================================================
+
+      - name: ccache statistics
+        if: always()
+        run: |
+          ccache --show-stats || true
+
+      # ============================================================
+      # ANYKERNEL3
+      # ============================================================
+
+      - name: Clone AnyKernel3
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            --branch "$AK3_BRANCH" \
+            "$AK3_REPO" AnyKernel3
+
+      # ============================================================
+      # PACKAGE
+      # ============================================================
+
+      - name: Package flashable ZIP
+        run: |
+          set -e
+
+          mkdir -p artifacts
+
+          cp \
+            kernel/out/arch/arm64/boot/Image.gz-dtb \
+            AnyKernel3/
+
+          cp \
+            kernel/out/arch/arm64/boot/dtbo.img \
+            AnyKernel3/
+
+          DATE="$(date -u '+%Y%m%d-%H%M')"
+
+          COMMIT="$(
+            cd kernel &&
+            git rev-parse --short=7 HEAD
+          )"
+
+          ZIP="FloppyKernel-KSUN-v3.4.0-ginkgo-SUSFS-${DATE}-${COMMIT}.zip"
+
+          cd AnyKernel3
+
+          zip -r9 \
+            "../artifacts/$ZIP" \
+            . \
+            -x '*.git*' \
+            -x 'README.md' \
+            -x '*placeholder*'
+
+          cd ..
+
+          echo "ZIP_NAME=$ZIP" >> "$GITHUB_ENV"
+
+          ls -lh artifacts/
+
+      # ============================================================
+      # CHECK ZIP
+      # ============================================================
+
+      - name: Verify ZIP
+        run: |
+          se
