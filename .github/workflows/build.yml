@@ -1,89 +1,254 @@
-name: Test POCO F5 Marble
+name: 🚀 Build Melt-RataKanan CLEAN & STABLE POCO F5 (Pure KSU + Built-in DLKM)
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: 'Pilih Branch Source Pzqqt'
+        required: true
+        default: 'melt-rebase'
+        type: choice
+        options:
+          - melt-rebase
+          - bouquet
+          - bouquet_ci
+      ksu_branch:
+        description: 'Pilih Branch KernelSU-Next (Disarankan: next)'
+        required: true
+        default: 'next'
+        type: choice
+        options:
+          - next
+          - dev
 
 jobs:
-test:
-runs-on: ubuntu-22.04
+  build-marble-clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
 
-steps:
-  - name: Checkout Marble Kernel
-    uses: actions/checkout@v5
-    with:
-      repository: Pzqqt/android_kernel_xiaomi_marble
-      ref: melt-rebase
-      fetch-depth: 1
+    steps:
+      - name: 🧹 1. Bersihkan Disk Runner & Install Senjata Kompilasi
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            aria2 bc bison build-essential ccache curl device-tree-compiler \
+            flex git libelf-dev libssl-dev libncurses5-dev lz4 \
+            python3 python-is-python3 rsync unzip wget xz-utils zip zstd
 
-  - name: Show Kernel Source
-    run: |
-      echo "Repository:"
-      git remote -v
-      echo
-      echo "Commit:"
-      git rev-parse HEAD
-      echo
-      echo "Files:"
-      ls -lah
-      echo
-      echo "Defconfig:"
-      ls arch/arm64/configs/ | grep marble
+      - name: 📥 2. Clone Source Kernel Pzqqt (POCO F5 / marble)
+        run: |
+          git clone --depth=1 -b ${{ github.event.inputs.kernel_branch }} \
+            https://github.com/Pzqqt/android_kernel_xiaomi_marble.git kernel
+          cd kernel
+          echo "=== INFO COMMIT TERAKHIR SOURCE PZQQT ==="
+          git log -1
 
-  - name: Install Dependencies
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y \
-        bc \
-        bison \
-        build-essential \
-        flex \
-        git \
-        libelf-dev \
-        libncurses-dev \
-        libssl-dev \
-        python3 \
-        rsync
+      - name: ⚡ 3. Download Toolchain ZyC Clang/LLVM Terbaru (Anti-Limit + Aria2c Turbo)
+        run: |
+          mkdir -p clang
+          CLANG_URL=$(curl -fsSL "https://raw.githubusercontent.com/ZyCromerZ/Clang/refs/heads/main/Clang-main-link.txt" | tr -d '\r\n')
 
-  - name: Configure Kernel
-    run: |
-      export ARCH=arm64
+          if [ -z "$CLANG_URL" ]; then
+            CLANG_URL=$(curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              https://api.github.com/repos/ZyCromerZ/Clang/releases/latest | grep "browser_download_url.*tar.gz" | cut -d '"' -f 4 | head -n 1)
+          fi
 
-      mkdir -p out
+          echo "Mengunduh Toolchain dari: $CLANG_URL"
+          aria2c -x16 -s16 --console-log-level=warn "$CLANG_URL" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm clang.tar.gz
 
-      make O=out marble_defconfig
+      - name: 🗂️ 4. Aktifkan CCACHE (Sedot Cache Lama Biar Ngebut)
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: marble-ccache-${{ github.event.inputs.kernel_branch }}-${{ github.run_id }}
+          restore-keys: |
+            marble-ccache-${{ github.event.inputs.kernel_branch }}-
+            marble-ccache-
 
-      echo
-      echo "Kernel configuration generated."
-      echo
-      grep -E \
-        "CONFIG_ARM64|CONFIG_LTO_CLANG|CONFIG_CFI" \
-        out/.config || true
+      - name: 🛡️ 5. Suntik Pure KernelSU-Next (Tanpa SuSFS demi Stabilitas Boot)
+        run: |
+          cd kernel
 
-  - name: Test Build
-    run: |
-      export ARCH=arm64
+          echo "--> [1/2] Menghapus sisa KernelSU bawaan Pzqqt..."
+          rm -rf KernelSU KernelSU-Next drivers/kernelsu
+          sed -i '/kernelsu/d' drivers/Makefile || true
+          sed -i '/kernelsu/d' drivers/Kconfig || true
 
-      make \
-        -j2 \
-        O=out \
-        Image.gz \
-        2>&1 | tee build.log
+          echo "--> [2/2] Menarik Pure KernelSU-Next branch: ${{ github.event.inputs.ksu_branch }}..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ github.event.inputs.ksu_branch }}/kernel/setup.sh" | bash -s ${{ github.event.inputs.ksu_branch }}
 
-  - name: Upload Build Log
-    if: always()
-    uses: actions/upload-artifact@v4
-    with:
-      name: marble-build-log
-      path: build.log
-      if-no-files-found: ignore
+      - name: ⚙️ 6. Racik Defconfig "RATA KANAN BERSIH" (Performa, TCP BBR, KSU Stabil)
+        run: |
+          cd kernel
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:${PATH}"
 
-  - name: Upload Kernel
-    if: success()
-    uses: actions/upload-artifact@v4
-    with:
-      name: marble-kernel-test
-      path: |
-        out/arch/arm64/boot/Image
-        out/arch/arm64/boot/Image.gz
-        out/.config
-      if-no-files-found: warn
+          if [ -f "arch/arm64/configs/marble_defconfig" ]; then
+            DEFCONFIG_TARGET="marble_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/marble_GKI.config" ]; then
+            DEFCONFIG_TARGET="gki_defconfig vendor/marble_GKI.config"
+          else
+            DEFCONFIG_TARGET="gki_defconfig"
+          fi
+          
+          make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 $DEFCONFIG_TARGET
+
+          # [1] Identitas Kernel
+          ./scripts/config --file out/.config \
+            --set-str CONFIG_LOCALVERSION "-Melt-RataKanan-Clean"
+
+          # [2] Konfigurasi Pure KernelSU-Next (Wajib Kprobes Aktif)
+          ./scripts/config --file out/.config \
+            -e CONFIG_KSU \
+            -e CONFIG_KSU_WITH_KPROBES \
+            -e CONFIG_KSU_KPROBES_HOOK \
+            -e CONFIG_KPROBES \
+            -e CONFIG_HAVE_KPROBES \
+            -e CONFIG_KPROBE_EVENTS
+
+          # [3] Leburkan Modul DLKM Penting Langsung ke Image.gz (=y)
+          ./scripts/config --file out/.config \
+            -e CONFIG_MODULES \
+            -d CONFIG_MODULE_SIG_FORCE \
+            -d CONFIG_MODULE_SIG_ALL \
+            -e CONFIG_NTSYNC \
+            -e CONFIG_MQ_IOSCHED_ADIOS \
+            -e CONFIG_IOSCHED_BFQ \
+            -e CONFIG_MTK_CPQ_IO_SCHED
+
+          # [4] Upgrade TCP BBR + Fair Queue (FQ)
+          ./scripts/config --file out/.config \
+            -e CONFIG_TCP_CONG_ADVANCED \
+            -e CONFIG_TCP_CONG_BBR \
+            -e CONFIG_DEFAULT_BBR \
+            --set-str CONFIG_DEFAULT_TCP_CONG "bbr" \
+            -e CONFIG_NET_SCHED \
+            -e CONFIG_NET_SCH_FQ \
+            -e CONFIG_NET_SCH_FQ_CODEL \
+            -e CONFIG_DEFAULT_FQ \
+            --set-str CONFIG_DEFAULT_NET_SCH "fq" \
+            -e CONFIG_NETFILTER_XT_TARGET_HL \
+            -e CONFIG_IP_NF_TARGET_TTL \
+            -e CONFIG_IP6_NF_TARGET_HL
+
+          # [5] Performa Rata Kanan (ThinLTO + 300Hz + MGLRU)
+          ./scripts/config --file out/.config \
+            -e CONFIG_LTO_CLANG_THIN \
+            -e CONFIG_HZ_300 \
+            --set-val CONFIG_HZ 300 \
+            -e CONFIG_WQ_POWER_EFFICIENT_DEFAULT \
+            -e CONFIG_LRU_GEN \
+            -e CONFIG_LRU_GEN_ENABLED \
+            -d CONFIG_KSHRINK_LRUVECD \
+            -e CONFIG_CRYPTO_LZ4 \
+            -e CONFIG_CRYPTO_ZSTD \
+            -e CONFIG_RMNET_PERF \
+            -e CONFIG_RMNET_SHS \
+            -e CONFIG_BOEFFLA_WL_BLOCKER
+
+          # [6] Diet Sampah Kernel
+          ./scripts/config --file out/.config \
+            -d CONFIG_AUDIT \
+            -d CONFIG_DEBUG_FS \
+            -d CONFIG_CORESIGHT \
+            -d CONFIG_PAGE_OWNER \
+            -d CONFIG_SLUB_DEBUG
+
+          make O=out ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+      - name: 🔥 7. Compile Kernel Image (Gaspol Semua Core)
+        run: |
+          cd kernel
+          export PATH="/usr/lib/ccache:${GITHUB_WORKSPACE}/clang/bin:${PATH}"
+          export CCACHE_DIR="${HOME}/.ccache"
+          export CCACHE_SLOPPINESS="file_macro,locale,time_macros"
+          export KBUILD_BUILD_TIMESTAMP="Thu Oct 15 00:00:00 UTC 2026"
+          export KBUILD_BUILD_USER="Fauzi"
+          export KBUILD_BUILD_HOST="Clean-Lab"
+
+          ccache -M 5G
+          ccache -z
+
+          make -j$(nproc --all) \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC="ccache clang" \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image Image.gz
+
+          ccache -s
+
+      - name: 📦 8. Rakit AnyKernel3 + Script Tweak Rata Kanan
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/README.md
+
+          sed -i 's/device.name1=.*/device.name1=marble/' AnyKernel3/anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=marblein/' AnyKernel3/anykernel.sh
+          sed -i 's/BLOCK=.*/BLOCK=auto;/' AnyKernel3/anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' AnyKernel3/anykernel.sh
+
+          if [ -f "kernel/out/arch/arm64/boot/Image.gz" ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
+          else
+            cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+          fi
+
+          cat << 'EOF' > AnyKernel3/99_marble_ratakanan.sh
+          #!/system/bin/sh
+          while [ "$(getprop sys.boot_completed)" != "1" ]; do
+              sleep 2
+          done
+
+          sysctl -w net.core.default_qdisc=fq
+          sysctl -w net.ipv4.tcp_congestion_control=bbr
+          sysctl -w net.ipv4.tcp_ecn=1
+          sysctl -w net.ipv4.tcp_fastopen=3
+          sysctl -w net.ipv4.tcp_tw_reuse=1
+          
+          sysctl -w net.core.rmem_max=16777216
+          sysctl -w net.core.wmem_max=16777216
+
+          for queue in /sys/block/sd*/queue/scheduler /sys/block/mmcblk*/queue/scheduler; do
+              if [ -f "$queue" ]; then
+                  if grep -q "adios" "$queue"; then
+                      echo "adios" > "$queue" 2>/dev/null
+                  elif grep -q "cpq" "$queue"; then
+                      echo "cpq" > "$queue" 2>/dev/null
+                  fi
+              fi
+          done
+
+          if [ -f "/sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker" ]; then
+              echo "qcom_rx_wakelock;wlan_pno_wl;wlan_extscan_wl;ipa_client_apps_wan_cons;NETLINK" > /sys/class/misc/boeffla_wakelock_blocker/wakelock_blocker 2>/dev/null
+          fi
+          EOF
+
+          cat << 'EOF' >> AnyKernel3/anykernel.sh
+
+          if [ -d "/data/adb/service.d" ]; then
+            ui_print "- Memasang Script Auto-Tweak Rata Kanan..."
+            cp -f $home/99_marble_ratakanan.sh /data/adb/service.d/99_marble_ratakanan.sh
+            chmod 0755 /data/adb/service.d/99_marble_ratakanan.sh
+          fi
+          EOF
+
+          cd AnyKernel3
+          ZIP_NAME="Melt-RataKanan-CLEAN-Marble-${{ github.event.inputs.kernel_branch }}-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "../${ZIP_NAME}" * -x "*.git*"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+
+      - name: 📤 9. Upload File Flashable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 14
+          
