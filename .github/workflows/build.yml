@@ -88,7 +88,7 @@ jobs:
           echo "=== Lokasi defconfig marble ==="
           find arch/arm64/configs -name '*marble*'
           echo "=== Driver WiFi (qcacld) ada di mana? ==="
-          find . -maxdepth 3 -iname '*wlan*' -o -iname '*qcacld*' 2>/dev/null | grep -v '^\./\.git' | head -n 10
+          find . -maxdepth 3 -iname '*wlan*' -o -iname '*qcacld*' 2>/dev/null | grep -v '^\./\.git' | head -n 10 || true
           WLAN_DIR=$(find . -maxdepth 4 -type d -iname 'qcacld*' 2>/dev/null | head -n1)
           echo "WLAN_DIR terdeteksi: ${WLAN_DIR:-(gak ketemu, berarti driver WiFi binary/di luar tree)}"
           echo "=== Sudah ada hook monitor mode (con_mode) belum? ==="
@@ -120,7 +120,8 @@ jobs:
             SETUP_URL="https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh"
             KSU_REF="dev-susfs"
           else
-            SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
+            # Branch "next" di repo KernelSU-Next resmi udah gak ada (sisa: dev, legacy, dll), jadi pakai "dev".
+            SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh"
             KSU_REF="dev"
           fi
           echo "Pakai root solution: $ROOT_SOLUTION, URL: $SETUP_URL"
@@ -382,4 +383,18 @@ jobs:
           path: ${{ env.ZIP_NAME }}
 
       - name: Upload driver RTL8188EUS (kalau berhasil dibuild)
-        
+        if: ${{ inputs.enable_rtl8188eus }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTL8188EUS-Module
+          path: out-extra/8188eu.ko
+          if-no-files-found: ignore
+
+      - name: Upload log kalau gagal
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel-source/build.log
+          if-no-files-found: ignore
+          
