@@ -241,18 +241,6 @@ jobs:
             echo "CONFIG_MQ_IOSCHED_KYBER=y"
             echo "CONFIG_IOSCHED_BFQ=y"
             echo "CONFIG_MQ_IOSCHED_BFQ=y"
-            # TTL (HL) + NFQUEUE
-            echo "CONFIG_NETFILTER_ADVANCED=y"
-            echo "CONFIG_NF_CONNTRACK=y"
-            echo "CONFIG_NETFILTER_NETLINK=y"
-            echo "CONFIG_NETFILTER_NETLINK_QUEUE=y"
-            echo "CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y"
-            echo "CONFIG_NETFILTER_XT_TARGET_HL=y"
-            echo "CONFIG_NETFILTER_XT_MATCH_HL=y"
-            echo "CONFIG_IP_NF_IPTABLES=y"
-            echo "CONFIG_IP_NF_MANGLE=y"
-            echo "CONFIG_IP6_NF_IPTABLES=y"
-            echo "CONFIG_IP6_NF_MANGLE=y"
           } >> "$DEF_PATH"
 
       - name: Siapin defconfig
@@ -409,4 +397,5 @@ jobs:
           name: build-log
           path: kernel-source/build.log
           if-no-files-found: ignore
+
           
